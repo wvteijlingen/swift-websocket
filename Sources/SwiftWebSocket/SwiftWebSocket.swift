@@ -9,7 +9,14 @@ public enum WebSocketError: Swift.Error {
 
 extension WebSocket {
     public enum State {
-        case notConnected, connecting, connected, disconnected
+        /// The socket is initialized and ready to connect.
+        case notConnected
+        /// The WebSocket is in the process of connecting.
+        case connecting
+        /// The WebSocket is connected.
+        case connected
+        /// The WebSocket is disconnected after being connected.
+        case disconnected
     }
 }
 
@@ -18,13 +25,11 @@ public class WebSocket {
 
     public let messages: AsyncThrowingStream<Data, Error>
 
-    private let urlRequest: URLRequest
-    private let urlSession: URLSession
-
-    private var socketTask: URLSessionWebSocketTask?
+    private let socketTask: URLSessionWebSocketTask
     private var socketTaskDelegate: SocketTaskDelegate?
 
-    private var messagesContinuation: AsyncThrowingStream<Data, Error>.Continuation!
+    private let messagesContinuation: AsyncThrowingStream<Data, Error>.Continuation
+    private var heartbeatTask: Task<Void, Error>?
 
     /// Intializes a new WebSocket.
     ///
@@ -32,12 +37,12 @@ public class WebSocket {
     ///   - request: The URLRequest used when conneting the WebSocket.
     ///   - urlSession: The URLSession used when connecting the WebSocket.
     public init(request: URLRequest, urlSession: URLSession = URLSession.shared) {
-        self.urlRequest = request
-        self.urlSession = urlSession
 
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self, throwing: Error.self)
         self.messages = stream
         self.messagesContinuation = continuation
+
+        self.socketTask = urlSession.webSocketTask(with: request)
     }
 
     public convenience init(url: URL, urlSession: URLSession = URLSession.shared) {
@@ -63,22 +68,28 @@ public class WebSocket {
 
         state = .connecting
 
-        await withCheckedContinuation { continuation in
+        try await withCheckedThrowingContinuation { continuation in
             let delegate = SocketTaskDelegate { _ in
                 self.state = .connected
                 continuation.resume()
                 self.receive()
+
             } onWebSocketTaskDidClose: { _, _ in
                 self.handleDisconnect(withError: nil)
+
             } onWebSocketTaskDidCompleteWithError: { error in
+                // Only propagate errors that occur during the process of connecting the socket.
+                if let error, self.state == .connecting {
+                    continuation.resume(throwing: error)
+                }
+
                 self.handleDisconnect(withError: error)
             }
 
             self.socketTaskDelegate = delegate
+            socketTask.delegate = delegate
 
-            socketTask = urlSession.webSocketTask(with: urlRequest)
-            socketTask?.delegate = delegate
-            socketTask?.resume()
+            socketTask.resume()
         }
     }
     
@@ -93,8 +104,7 @@ public class WebSocket {
 
         messagesContinuation.finish()
 
-        socketTask?.cancel(with: .normalClosure, reason: nil)
-        socketTask = nil
+        socketTask.cancel(with: .normalClosure, reason: nil)
         socketTaskDelegate = nil
     }
 
@@ -129,6 +139,33 @@ public class WebSocket {
         try await send(.data(data))
     }
 
+    // MARK: - Heartbeats
+
+    /// Start sending a heartbeat at regular intervals.
+    ///
+    /// - Parameters:
+    ///   - heartbeat: The heartbeat data to send.
+    ///   - interval: The interval between heartbeats.
+    public func startHeartbeats(sending heartbeat: Data, every interval: Duration) {
+        heartbeatTask?.cancel()
+
+        heartbeatTask = Task {
+            if Task.isCancelled { return }
+
+            try await send(heartbeat)
+
+            try await Task.sleep(for: interval)
+
+            startHeartbeats(sending: heartbeat, every: interval)
+        }
+    }
+
+    /// Stop sending heartbeats.
+    public func stopHeartbeats() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+    }
+
     // MARK: - Private
 
     private func send(_ message: URLSessionWebSocketTask.Message) async throws {
@@ -137,7 +174,7 @@ public class WebSocket {
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            socketTask?.send(message) { error in
+            socketTask.send(message) { error in
                 if let error {
                     continuation.resume(with: .failure(error))
                 } else {
@@ -148,7 +185,7 @@ public class WebSocket {
     }
 
     private func receive() {
-        socketTask?.receive { [weak self] result in
+        socketTask.receive { [weak self] result in
             switch result {
             case .success(.data(let data)):
                 self?.messagesContinuation.yield(data)
@@ -175,7 +212,6 @@ public class WebSocket {
     private func handleDisconnect(withError error: Error?) {
         state = .disconnected
         messagesContinuation.finish(throwing: error)
-        socketTask = nil
         socketTaskDelegate = nil
     }
 }
