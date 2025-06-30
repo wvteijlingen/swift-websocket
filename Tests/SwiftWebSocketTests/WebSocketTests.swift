@@ -92,12 +92,8 @@ struct WebSocketTests {
 
         let message = try await webSocket.messages.first { element in
             switch element {
-            case .string(let string):
-                string == stringToSend
-            case .data:
-                false
-            case .invalid:
-                false
+            case .string(let string): string == stringToSend
+            default: false
             }
         }
 
@@ -113,16 +109,37 @@ struct WebSocketTests {
 
         let message = try await webSocket.messages.first { element in
             switch element {
-            case .string:
-                false
-            case .data(let data):
-                data == dataToSend
-            case .invalid:
-                false
+            case .data(let data): data == dataToSend
+            default: false
             }
         }
 
         #expect(message != nil)
+    }
+
+    @Test
+    func sendCodable() async throws {
+        struct CodableModel: Codable, Equatable {
+            let foo: String
+        }
+
+        let valueToSend = CodableModel(foo: "fooValue")
+
+        try await webSocket.connect()
+        try await webSocket.send(valueToSend, encoder: JSONEncoder())
+
+        let message = try await webSocket.messages
+            .first { element in
+                switch element {
+                case .data: true
+                default: false
+                }
+            }
+            .flatMap { message in
+                try message.decode(CodableModel.self, decoder: JSONDecoder())
+            }
+
+        #expect(message == valueToSend)
     }
 
     @Test
