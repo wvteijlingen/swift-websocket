@@ -47,8 +47,6 @@ struct WebSocketTests {
         try await webSocket.connect()
         try await webSocket.disconnect(closeCode: .normalClosure)
 
-        try await Task.sleep(for: .seconds(1))
-
         #expect(await webSocket.state == .disconnected)
         #expect(stateEvents == [.connecting, .connected, .disconnected(closeCode: .normalClosure, reason: nil)])
         #expect(stateEventsFinished)
@@ -75,8 +73,6 @@ struct WebSocketTests {
 
         try await webSocket.connect()
         try await webSocket.disconnect(closeCode: .goingAway, reason: "See you later")
-
-        try await Task.sleep(for: .seconds(1))
 
         #expect(await webSocket.state == .disconnected)
         #expect(stateEvents == [.connecting, .connected, .disconnected(closeCode: .goingAway, reason: "See you later")])

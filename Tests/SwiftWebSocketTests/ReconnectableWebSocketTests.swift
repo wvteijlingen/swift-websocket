@@ -25,6 +25,7 @@ struct ReconnectableWebSocketTests {
         }
 
         try await webSocket.connect()
+        try await Task.sleep(for: .seconds(1))
 
         #expect(await webSocket.state == .connected)
         #expect(stateEvents == [.connecting, .connected])
@@ -53,7 +54,6 @@ struct ReconnectableWebSocketTests {
 
         try await webSocket.connect()
         try await webSocket.disconnect(closeCode: .normalClosure, reason: nil)
-
         try await Task.sleep(for: .seconds(1))
 
         #expect(await webSocket.state == .disconnected)
@@ -81,7 +81,6 @@ struct ReconnectableWebSocketTests {
 
         try await webSocket.connect()
         try await webSocket.disconnect(closeCode: .goingAway, reason: "See you later")
-
         try await Task.sleep(for: .seconds(1))
 
         #expect(await webSocket.state == .disconnected)
@@ -103,6 +102,7 @@ struct ReconnectableWebSocketTests {
         try await webSocket.connect()
         try await webSocket.disconnect(closeCode: .normalClosure, reason: nil)
         try await webSocket.connect()
+        try await Task.sleep(for: .seconds(1))
 
         #expect(await webSocket.state == .connected)
         #expect(stateEvents == [
