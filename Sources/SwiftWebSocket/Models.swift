@@ -1,7 +1,7 @@
-import Foundation
 import Combine
+import Foundation
 
-public enum WebSocketError: Error {
+public enum WebSocketError: Error, Sendable {
     case alreadyConnectedOrConnecting
     case notConnected
     case cannotParseMessageAsJSON(String)
@@ -9,7 +9,7 @@ public enum WebSocketError: Error {
 }
 
 extension WebSocket {
-    public enum State: Equatable {
+    public enum State: Equatable, Sendable {
         /// The socket is initialized and ready to connect
         case notConnected
         /// The socket is in the process of connecting
@@ -20,7 +20,7 @@ extension WebSocket {
         case disconnected
     }
 
-    public enum StateChangedEvent: Equatable {
+    public enum StateChangedEvent: Equatable, Sendable {
         /// The socket is in the process of connecting
         case connecting
         /// The socket is connected
@@ -29,12 +29,12 @@ extension WebSocket {
         case disconnected(closeCode: URLSessionWebSocketTask.CloseCode?, reason: String?)
     }
 
-    public enum Heartbeats {
+    public enum Heartbeats: Sendable {
         case disabled
         case enabled(every: Duration, data: Data)
     }
 
-    public enum Message {
+    public enum Message: Sendable {
         /// A string message
         case string(String)
         /// A data message
@@ -66,7 +66,7 @@ extension WebSocket {
 }
 
 extension ReconnectableWebSocket {
-    enum ConnectEvent {
+    enum ConnectEvent: Sendable {
         case initial
         case reconnect(error: Error)
     }

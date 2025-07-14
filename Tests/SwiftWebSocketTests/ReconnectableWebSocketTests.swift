@@ -1,26 +1,35 @@
+//
+//  ReconnectableWebSocketTests.swift
+//  SwiftWebSocket
+//
+//  Created by Ward van Teijlingen on 14/07/2025.
+//
+
 import Foundation
 import Testing
 @testable import SwiftWebSocket
 
-struct WebSocketTests {
-    private let webSocket = WebSocket(url: URL(string: "wss://echo.websocket.org")!)
+struct ReconnectableWebSocketTests {
+    private var webSocket = ReconnectableWebSocket {
+        URLRequest(url: URL(string: "wss://echo.websocket.org")!)
+    }
 
     @Test
     func connect() async throws {
         var stateEvents: [WebSocket.StateChangedEvent] = []
-        var stateEventsFinished = false
 
-        Task {
+        let task = Task {
             for await event in webSocket.stateEvents {
                 stateEvents.append(event)
             }
-            stateEventsFinished = true
         }
 
         try await webSocket.connect()
+
         #expect(await webSocket.state == .connected)
         #expect(stateEvents == [.connecting, .connected])
-        #expect(!stateEventsFinished)
+        
+        task.cancel()
     }
 
     @Test
@@ -35,23 +44,22 @@ struct WebSocketTests {
     @Test
     func disconnect() async throws {
         var stateEvents: [WebSocket.StateChangedEvent] = []
-        var stateEventsFinished = false
 
-        Task {
+        let task = Task {
             for await event in webSocket.stateEvents {
                 stateEvents.append(event)
             }
-            stateEventsFinished = true
         }
 
         try await webSocket.connect()
-        try await webSocket.disconnect(closeCode: .normalClosure)
+        try await webSocket.disconnect(closeCode: .normalClosure, reason: nil)
 
         try await Task.sleep(for: .seconds(1))
 
         #expect(await webSocket.state == .disconnected)
         #expect(stateEvents == [.connecting, .connected, .disconnected(closeCode: .normalClosure, reason: nil)])
-        #expect(stateEventsFinished)
+
+        task.cancel()
     }
 
     @Test
@@ -64,13 +72,11 @@ struct WebSocketTests {
     @Test
     func disconnectWithCloseCodeAndReason() async throws {
         var stateEvents: [WebSocket.StateChangedEvent] = []
-        var stateEventsFinished = false
 
-        Task {
+        let task = Task {
             for await event in webSocket.stateEvents {
                 stateEvents.append(event)
             }
-            stateEventsFinished = true
         }
 
         try await webSocket.connect()
@@ -80,7 +86,34 @@ struct WebSocketTests {
 
         #expect(await webSocket.state == .disconnected)
         #expect(stateEvents == [.connecting, .connected, .disconnected(closeCode: .goingAway, reason: "See you later")])
-        #expect(stateEventsFinished)
+
+        task.cancel()
+    }
+
+    @Test
+    func reconnect() async throws {
+        var stateEvents: [WebSocket.StateChangedEvent] = []
+
+        let task = Task {
+            for await event in webSocket.stateEvents {
+                stateEvents.append(event)
+            }
+        }
+
+        try await webSocket.connect()
+        try await webSocket.disconnect(closeCode: .normalClosure, reason: nil)
+        try await webSocket.connect()
+
+        #expect(await webSocket.state == .connected)
+        #expect(stateEvents == [
+            .connecting,
+            .connected,
+            .disconnected(closeCode: .normalClosure, reason: nil),
+            .connecting,
+            .connected
+        ])
+
+        task.cancel()
     }
 
     @Test
@@ -90,7 +123,7 @@ struct WebSocketTests {
         try await webSocket.connect()
         try await webSocket.send(stringToSend)
 
-        let message = try await webSocket.messages.first { element in
+        let message = await webSocket.messages.first { element in
             switch element {
             case .string(let string): string == stringToSend
             default: false
@@ -107,7 +140,7 @@ struct WebSocketTests {
         try await webSocket.connect()
         try await webSocket.send(dataToSend)
 
-        let message = try await webSocket.messages.first { element in
+        let message = await webSocket.messages.first { element in
             switch element {
             case .data(let data): data == dataToSend
             default: false

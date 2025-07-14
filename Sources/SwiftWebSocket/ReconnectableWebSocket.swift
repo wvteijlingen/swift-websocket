@@ -4,15 +4,19 @@ import Combine
 actor ReconnectableWebSocket {
     /// A stream of messages received by the socket.
     ///
-    /// This stream will never finish.
-    public let messages: AsyncStream<WebSocket.Message>
+    /// This stream will only finish when ReconnectableWebSocket deinitializes.
+    public nonisolated let messages: AsyncStream<WebSocket.Message>
     
     /// A stream of changes to the socket state.
     ///
-    /// This stream will never finish.
-    public let stateEvents: AsyncStream<WebSocket.StateChangedEvent>
+    /// This stream will only finish when ReconnectableWebSocket deinitializes.
+    public nonisolated let stateEvents: AsyncStream<WebSocket.StateChangedEvent>
 
-    var state: WebSocket.State { webSocket?.state ?? .notConnected }
+    var state: WebSocket.State {
+        get async {
+            await webSocket?.state ?? .notConnected
+        }
+    }
 
     private let connector: () -> URLRequest
     private let urlSession: URLSession
@@ -20,7 +24,9 @@ actor ReconnectableWebSocket {
 
     private let messagesContinuation: AsyncStream<WebSocket.Message>.Continuation
     private var stateEventsContinuation: AsyncStream<WebSocket.StateChangedEvent>.Continuation
-    private var streamTask: Task<Void, Error>?
+
+    private var messagesTask: Task<Void, Error>?
+    private var stateEventsTask: Task<Void, Error>?
 
     private var webSocket: WebSocket?
     
@@ -33,7 +39,7 @@ actor ReconnectableWebSocket {
     ///   - urlSession: The URLSession used when connecting the WebSocket.
     ///   - heartbeats: Whether to send heartbeats after connecting.
     ///   - connector: A closure that returns a URLRequest used to connect the WebSocket. This closure will be called
-    ///                every time the web WebSocket reconnects.
+    ///                every time the web WebSocket connects.
     init(
         urlSession: URLSession = URLSession.shared,
         heartbeats: WebSocket.Heartbeats = .disabled,
@@ -51,14 +57,27 @@ actor ReconnectableWebSocket {
         self.connector = connector
         self.heartbeats = heartbeats
     }
-    
+
+    deinit {
+        messagesContinuation.finish()
+        stateEventsContinuation.finish()
+    }
+
     /// Connects the WebSocket.
     ///
     /// - Throws WebSocketError.alreadyConnectedOrConnecting when the socket is already connected or connecting.
     public func connect() async throws {
+        let validStates = [WebSocket.State.notConnected, .disconnected]
+
+        guard await validStates.contains(state) else {
+            throw WebSocketError.alreadyConnectedOrConnecting
+        }
+
         let urlRequest = self.connector()
         let webSocket = WebSocket(request: urlRequest, urlSession: urlSession, heartbeats: heartbeats)
         self.webSocket = webSocket
+
+        createStreamTasks(for: webSocket)
 
         try await webSocket.connect()
     }
@@ -73,35 +92,85 @@ actor ReconnectableWebSocket {
     public func disconnect(
         closeCode: URLSessionWebSocketTask.CloseCode = .normalClosure,
         reason: String? = nil
-    ) throws {
+    ) async throws {
         guard let webSocket = webSocket else {
             throw WebSocketError.notConnected
         }
 
-        try webSocket.disconnect(closeCode: closeCode, reason: reason)
+        try await webSocket.disconnect(closeCode: closeCode, reason: reason)
+
+        messagesTask?.cancel()
+        stateEventsTask?.cancel()
     }
 
-    private func handleConnect(of webSocket: WebSocket) {
-        streamTask = Task { [weak self] in
-            guard let self = self else { return }
+    // MARK: - Sending Data
 
+    /// Sends the given encodable `value` through the WebSocket.
+    ///
+    /// - Parameters:
+    ///   - value: The encodable value that is sent through the websocket.
+    ///   - encoder: The encoder used to encode the value.
+    ///
+    /// - Throws WebSocketError.notConnected when the `send` method is called before the WebSocket is connected.
+    public func send<Encoder>(
+        _ value: any Encodable,
+        encoder: Encoder
+    ) async throws where Encoder: TopLevelEncoder, Encoder.Output == Data {
+        guard await webSocket?.state == .connected else {
+            throw WebSocketError.notConnected
+        }
+        
+        let data = try encoder.encode(value)
+        try await webSocket?.send(data)
+    }
+
+    /// Sends the given `string` through the websocket.
+    ///
+    /// - Throws WebSocketError.notConnected when the `send` method is called before the WebSocket is connected.
+    public func send(_ string: String) async throws {
+        guard await webSocket?.state == .connected else {
+            throw WebSocketError.notConnected
+        }
+
+        try await webSocket?.send(string)
+    }
+
+    /// Sends the given `data` through the WebSocket.
+    ///
+    /// - Throws WebSocketError.notConnected when the `send` method is called before the WebSocket is connected.
+    public func send(_ data: Data) async throws {
+        guard await webSocket?.state == .connected else {
+            throw WebSocketError.notConnected
+        }
+
+        try await webSocket?.send(data)
+    }
+
+    private func createStreamTasks(for webSocket: WebSocket) {
+        messagesTask = Task {
             do {
                 for try await message in webSocket.messages {
+                    if Task.isCancelled { return }
                     messagesContinuation.yield(message)
                 }
             } catch {
-                await handleDisconnect(withError: error)
+                handleDisconnect(withError: error)
             }
+        }
 
+        stateEventsTask = Task {
             for try await state in webSocket.stateEvents {
-                await stateEventsContinuation.yield(state)
+                if Task.isCancelled { return }
+                stateEventsContinuation.yield(state)
             }
         }
     }
 
     private func handleDisconnect(withError error: Error) {
         webSocket = nil
-        streamTask?.cancel()
-        streamTask = nil
+        messagesTask?.cancel()
+        messagesTask = nil
+        stateEventsTask?.cancel()
+        stateEventsTask = nil
     }
 }

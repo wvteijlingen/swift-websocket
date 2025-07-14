@@ -1,19 +1,19 @@
 import Foundation
 import Combine
 
-public class WebSocket {
+public actor WebSocket {
     private(set) var state: State = .notConnected
 
     /// A stream of messages received by the socket.
     ///
     /// This stream will finish when the socket disconnects as expected,
     /// or throws when the socket disconnects due to an error.
-    public let messages: AsyncThrowingStream<Message, Error>
+    public nonisolated let messages: AsyncThrowingStream<Message, Error>
 
     /// A stream of changes to the socket state.
     ///
     /// This stream will finish after the socket disconnects.
-    public let stateEvents: AsyncStream<StateChangedEvent>
+    public nonisolated let stateEvents: AsyncStream<StateChangedEvent>
 
     private let socketTask: URLSessionWebSocketTask
     private var socketTaskDelegate: SocketTaskDelegate?
@@ -49,7 +49,7 @@ public class WebSocket {
         self.heartbeats = heartbeats
     }
 
-    public convenience init(
+    public init(
         url: URL,
         urlSession: URLSession = URLSession.shared,
         heartbeats: Heartbeats = .disabled
@@ -58,7 +58,9 @@ public class WebSocket {
     }
 
     deinit {
-        try? disconnect()
+        messagesContinuation.finish()
+        socketTask.cancel()
+        socketTaskDelegate = nil
     }
 
     // MARK: - Connecting / Disconnecting
@@ -79,18 +81,18 @@ public class WebSocket {
 
         try await withCheckedThrowingContinuation { continuation in
             let delegate = SocketTaskDelegate { _ in
-                self.handleConnect()
+                await self.handleConnect()
                 continuation.resume()
 
             } onWebSocketTaskDidClose: { closeCode, reason in
-                self.handleDisconnect(withError: nil, closeCode: closeCode, reason: reason)
+                await self.handleDisconnect(withError: nil, closeCode: closeCode, reason: reason)
 
             } onWebSocketTaskDidCompleteWithError: { error in
                 if let error {
-                    if case .connecting = self.state {
+                    if case .connecting = await self.state {
                         continuation.resume(throwing: error)
                     } else {
-                        self.handleDisconnect(withError: error, closeCode: nil, reason: nil)
+                        await self.handleDisconnect(withError: error, closeCode: nil, reason: nil)
                     }
                 }
             }
@@ -112,14 +114,22 @@ public class WebSocket {
     ///   - reason: Optional further information to explain the closing.
     ///
     /// - Throws WebSocketError.notConnected when the WebSocket is not connected.
-    func disconnect(closeCode: URLSessionWebSocketTask.CloseCode = .normalClosure, reason: String? = nil) throws {
+    func disconnect(closeCode: URLSessionWebSocketTask.CloseCode = .normalClosure, reason: String? = nil) async throws {
         guard state == .connected else {
             throw WebSocketError.notConnected
         }
 
-        messagesContinuation.finish()
-
         socketTask.cancel(with: closeCode, reason: reason?.data(using: .utf8))
+
+        // Wait for the OS to tell us the socketTask is actually disconnected
+        await _ = stateEvents.first { state in
+            switch state {
+            case .disconnected: true
+            default: false
+            }
+        }
+
+        messagesContinuation.finish()
         socketTaskDelegate = nil
     }
 
@@ -168,7 +178,6 @@ public class WebSocket {
             if Task.isCancelled { return }
 
             try await send(heartbeat)
-
             try await Task.sleep(for: interval)
 
             startHeartbeats(sending: heartbeat, every: interval)
@@ -199,7 +208,7 @@ public class WebSocket {
         }
     }
 
-    private func receive() {
+    private nonisolated func receive() {
         socketTask.receive { [weak self] result in
             switch result {
             case .success(.data(let data)):
@@ -252,15 +261,15 @@ public class WebSocket {
     }
 }
 
-private class SocketTaskDelegate: NSObject, URLSessionWebSocketDelegate {
-    private let onWebSocketTaskDidOpen: (_ protocol: String?) -> Void
-    private let onWebSocketTaskDidClose: (_ code: URLSessionWebSocketTask.CloseCode, _ reason: Data?) -> Void
-    private let onWebSocketTaskDidCompleteWithError: (_ error: Error?) -> Void
+private final class SocketTaskDelegate: NSObject, URLSessionWebSocketDelegate {
+    private let onWebSocketTaskDidOpen: @Sendable (_ protocol: String?) async -> Void
+    private let onWebSocketTaskDidClose: @Sendable (_ code: URLSessionWebSocketTask.CloseCode, _ reason: Data?) async -> Void
+    private let onWebSocketTaskDidCompleteWithError: @Sendable (_ error: Error?) async -> Void
 
     init(
-        onWebSocketTaskDidOpen: @escaping (_: String?) -> Void,
-        onWebSocketTaskDidClose: @escaping (_: URLSessionWebSocketTask.CloseCode, _: Data?) -> Void,
-        onWebSocketTaskDidCompleteWithError: @escaping (_: Error?) -> Void
+        onWebSocketTaskDidOpen: @Sendable @escaping (_: String?) async -> Void,
+        onWebSocketTaskDidClose: @Sendable @escaping (_: URLSessionWebSocketTask.CloseCode, _: Data?) async -> Void,
+        onWebSocketTaskDidCompleteWithError: @Sendable @escaping (_: Error?) async -> Void
     ) {
         self.onWebSocketTaskDidOpen = onWebSocketTaskDidOpen
         self.onWebSocketTaskDidClose = onWebSocketTaskDidClose
@@ -272,7 +281,9 @@ private class SocketTaskDelegate: NSObject, URLSessionWebSocketDelegate {
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol proto: String?
     ) {
-        onWebSocketTaskDidOpen(proto)
+        Task {
+            await onWebSocketTaskDidOpen(proto)
+        }
     }
 
     public func urlSession(
@@ -281,10 +292,14 @@ private class SocketTaskDelegate: NSObject, URLSessionWebSocketDelegate {
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason: Data?
     ) {
-        onWebSocketTaskDidClose(closeCode, reason)
+        Task {
+            await onWebSocketTaskDidClose(closeCode, reason)
+        }
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        onWebSocketTaskDidCompleteWithError(error)
+        Task {
+            await onWebSocketTaskDidCompleteWithError(error)
+        }
     }
 }
